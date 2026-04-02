@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>投放用户收益分析工具</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'PingFang SC','Microsoft YaHei',sans-serif;background:#f0f4ff;min-height:100vh}
+button{cursor:pointer;font-family:inherit}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useMemo,useCallback}=React;
+const LC_TH=0.85,RV_TH=0.1;
+const FEATURES=[
+  {key:"近一年搜索健康query的天数",label:"搜索健康天数"},
+  {key:"近一年有其他健康行为的天数",label:"健康行为天数"},
+  {key:"近一年搜索健康query的次数",label:"搜索健康次数"},
+  {key:"近一年其他健康行为的天数",label:"其他健康行为天数"},
+  {key:"上次搜索距今天数",label:"上次搜索距今天数"},
+  {key:"上次健康行为距今天数",label:"上次健康行为距今天数"},
+];
+function toNum(v){
+  if(v===null||v===undefined)return null;
+  const s=String(v).replace(/"/g,"").trim();
+  if(!s)return null;
+  const n=parseFloat(s);
+  return isNaN(n)?null:n;
+}
+function parseDate(s){
+  if(s===null||s===undefined)return null;
+  const c=String(s).replace(/"/g,"").replace(/\r/g,"").trim();
+  if(!c)return null;
+  const d=c.replace(/[-\/]/g,"");
+  if(d.length!==8)return null;
+  const y=+d.slice(0,4),m=+d.slice(4,6)-1,dd=+d.slice(6,8);
+  if(isNaN(y)||isNaN(m)||isNaN(dd))return null;
+  return new Date(y,m,dd);
+}
+function daysDiff(base,target){
+  if(!base||!target)return null;
+  const diff=Math.round((base-target)/86400000);
+  return diff>=0?diff:null;
+}
+function mean(arr){
+  const v=arr.filter(x=>x!==null&&!isNaN(x));
+  return v.length?v.reduce((a,b)=>a+b,0)/v.length:null;
+}
+function parseCSV(text){
+  const norm=text.replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+  const lines=norm.trim().split("\n");
+  const sep=lines[0].includes("\t")?"\t":",";
+  const headers=lines[0].split(sep).map(h=>h.trim().replace(/^"|"$/g,""));
+  const rows=[];
+  for(let i=1;i<lines.length;i++){
+    const vals=lines[i].split(sep).map(v=>v.trim().replace(/^"|"$/g,""));
+    if(vals.length<2)continue;
+    const r={};
+    headers.forEach((h,j)=>{r[h]=vals[j]??""});
+    rows.push(r);
+  }
+  return{headers,rows};
+}
+function processRows(rows){
+  return rows.map(r=>{
+    const nr={...r};
+    const base=parseDate(nr["调起的时间"]);
+    const sv=nr["最近一次健康搜索的时间"]||nr["最近一次搜索的时间"]||"";
+    const hv=nr["最近一次健康其他行为的时间"]||nr["最近一次健康行为的时间"]||nr["最近一次其他健康行为的时间"]||"";
+    nr["上次搜索距今天数"]=daysDiff(base,parseDate(sv));
+    nr["上次健康行为距今天数"]=daysDiff(base,parseDate(hv));
+    nr._lc=toNum(nr["调起用户的生命周期"]);
+    nr._rv=toNum(nr["调起用户的收益"]);
+    nr._lcShort=nr._lc!==null?nr._lc<LC_TH:null;
+    nr._rvHigh=nr._rv!==null?nr._rv>RV_TH:null;
+    nr._target=nr._lc!==null&&nr._rv!==null?(nr._lc<LC_TH&&nr._rv>RV_TH):null;
+    const s1=String(nr["近一年搜索健康query的天数"]).replace(/"/g,"").trim();
+    const s2=String(nr["近一年有其他健康行为的天数"]).replace(/"/g,"").trim();
+    nr._isMedical=!(s1===""&&s2==="");
+    return nr;
+  });
+}
+function fmt(v,d=1){return v===null||v===undefined?"N/A":Number(v).toFixed(d);}
+function fmtPct(a,b){return b&&b!==0?((a/b-1)*100).toFixed(1)+"%":"-";}
+
+const S2={fontSize:12};
+function StatCard({label,val,sub,color="#4f46e5",bg="#fff"}){
+  return(
+    <div style={{background:bg,borderRadius:12,padding:"14px 16px",boxShadow:"0 1px 4px rgba(0,0,0,0.08)",textAlign:"center"}}>
+      <div style={{fontSize:18,fontWeight:700,color}}>{val}</div>
+      {sub&&<div style={{fontSize:11,color,opacity:.7,marginTop:1}}>{sub}</div>}
+      <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>{label}</div>
+    </div>
+  );
+}
+function DataTable({headers,rows,headerBg="#f3f4f6",headerColor="#6b7280"}){
+  return(
+    <div style={{overflowX:"auto"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+        <thead><tr style={{background:headerBg}}>
+          {headers.map((h,i)=><th key={i} style={{padding:"8px 10px",textAlign:"left",color:headerColor,fontWeight:600,whiteSpace:"nowrap"}}>{h}</th>)}
+        </tr></thead>
+        <tbody>
+          {rows.map((r,i)=>(
+            <tr key={i} style={{borderBottom:"1px solid #f3f4f6",background:i%2===0?"#fff":"#fafafa"}}>
+              {r.map((c,j)=><td key={j} style={{padding:"7px 10px",...(c&&c.style?c.style:{})}}>{c&&c.text!==undefined?c.text:c}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+function Card({children,style={}}){
+  return<div style={{background:"#fff",borderRadius:12,padding:"16px 20px",boxShadow:"0 1px 6px rgba(0,0,0,0.07)",marginBottom:14,...style}}>{children}</div>;
+}
+function STitle({children,color="#374151"}){
+  return<h3 style={{margin:"0 0 12px",fontSize:15,color}}>{children}</h3>;
+}
+
+function App(){
+  const[rows,setRows]=useState(null);
+  const[loading,setLoading]=useState(false);
+  const[tab,setTab]=useState("overview");
+
+  const handleFile=useCallback(e=>{
+    const file=e.target.files[0];
+    if(!file)return;
+    setLoading(true);
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const{rows:raw}=parseCSV(ev.target.result);
+        setRows(processRows(raw));
+        setTab("overview");
+      }catch(err){alert("解析失败，请确认为UTF-8编码的CSV文件");}
+      setLoading(false);
+    };
+    reader.readAsText(file,"utf-8");
+  },[]);
+
+  const S=useMemo(()=>{
+    if(!rows)return null;
+    const med=rows.filter(r=>r._isMedical);
+    const nonMed=rows.filter(r=>!r._isMedical);
+    const target=rows.filter(r=>r._target===true);
+    const gm=grp=>({
+      n:grp.length,
+      lcShort:grp.filter(r=>r._lcShort).length,
+      lcShortPct:grp.filter(r=>r._lc!==null).length?(grp.filter(r=>r._lcShort).length/grp.filter(r=>r._lc!==null).length*100).toFixed(1):"-",
+      rvHigh:grp.filter(r=>r._rvHigh).length,
+      rvHighPct:grp.filter(r=>r._rv!==null).length?(grp.filter(r=>r._rvHigh).length/grp.filter(r=>r._rv!==null).length*100).toFixed(1):"-",
+      target:grp.filter(r=>r._target).length,
+      targetPct:grp.filter(r=>r._target!==null).length?(grp.filter(r=>r._target).length/grp.filter(r=>r._target!==null).length*100).toFixed(1):"-",
+      meanLC:mean(grp.map(r=>r._lc).filter(v=>v!==null)),
+      meanRV:mean(grp.map(r=>r._rv).filter(v=>v!==null)),
+    });
+    const groupAnalysis=FEATURES.map(f=>{
+      const getV=r=>f.key==="上次搜索距今天数"||f.key==="上次健康行为距今天数"?r[f.key]:toNum(r[f.key]);
+      const medTargetR=med.filter(r=>r._target===true&&getV(r)!==null);
+      const medNonTargetR=med.filter(r=>r._target===false&&getV(r)!==null);
+      return{...f,medTargetMean:mean(medTargetR.map(getV)),medNonTargetMean:mean(medNonTargetR.map(getV))};
+    });
+    return{med,nonMed,target,groupAnalysis,allM:gm(rows),medM:gm(med),nonMedM:gm(nonMed)};
+  },[rows]);
+
+  const tabs=[{id:"overview",label:"📊 总览"},{id:"insight",label:"🔍 用户特征分析"},{id:"active",label:"⏱️ 活跃阈值"}];
+
+  const handlePDF=async()=>{
+    const origTab=tab;
+    const allTabs=["overview","insight","active"];
+    const tabLabels={"overview":"📊 总览","insight":"🔍 用户特征分析","active":"⏱️ 活跃阈值"};
+    const snapshots=[];
+    for(const t of allTabs){
+      setTab(t);
+      await new Promise(r=>setTimeout(r,450));
+      const el=document.getElementById("pdf-content");
+      if(el)snapshots.push({label:tabLabels[t],html:el.innerHTML});
+    }
+    setTab(origTab);
+    const printId="__print_container__";
+    let container=document.getElementById(printId);
+    if(container)container.remove();
+    container=document.createElement("div");
+    container.id=printId;
+    container.innerHTML=`
+      <style>
+        @media print{
+          body>*:not(#${printId}){display:none!important}
+          #${printId}{display:block!important}
+          .print-section{page-break-after:always}
+          .print-section:last-child{page-break-after:auto}
+          table{border-collapse:collapse;width:100%;font-size:11px}
+          th,td{padding:5px 8px;border-bottom:1px solid #eee}
+          button{display:none!important}
+        }
+        @media screen{#${printId}{display:none}}
+      </style>
+      <div style="font-family:'PingFang SC','Microsoft YaHei',sans-serif;padding:16px;font-size:12px;color:#374151">
+        <div style="text-align:center;padding:16px;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;border-radius:10px;margin-bottom:20px">
+          <div style="font-size:20px;font-weight:700;margin-bottom:4px">📈 投放用户收益分析工具</div>
+          <div style="font-size:11px;opacity:.85">导出时间：${new Date().toLocaleString("zh-CN")}</div>
+        </div>
+        ${snapshots.map(s=>`<div class="print-section"><div style="font-size:15px;font-weight:700;color:#4f46e5;padding:8px 12px;background:#f0f4ff;border-left:4px solid #4f46e5;border-radius:6px;margin-bottom:12px">${s.label}</div>${s.html}</div>`).join("")}
+      </div>`;
+    document.body.appendChild(container);
+    window.print();
+  };
+
+  if(!rows)return(
+    <div style={{background:"#f0f4ff",minHeight:"100vh",padding:20,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{maxWidth:500,width:"100%"}}>
+        <div style={{background:"linear-gradient(135deg,#4f46e5,#7c3aed)",borderRadius:16,padding:"24px 28px",marginBottom:20,color:"#fff",textAlign:"center"}}>
+          <div style={{fontSize:44,marginBottom:8}}>📈</div>
+          <h1 style={{margin:0,fontSize:20,fontWeight:700}}>投放用户收益分析工具</h1>
+          <p style={{margin:"8px 0 0",opacity:.85,fontSize:13}}>上传CSV，分析行为标签，输出精准投放方案</p>
+        </div>
+        <div style={{background:"#fff",borderRadius:12,padding:32,boxShadow:"0 1px 6px rgba(0,0,0,0.07)",border:"2px dashed #c7d2fe",textAlign:"center"}}>
+          {loading?<div style={{color:"#6366f1",fontSize:15,padding:20}}>⏳ 正在解析数据...</div>:<>
+            <div style={{fontSize:48,marginBottom:12}}>📂</div>
+            <p style={{color:"#4f46e5",fontWeight:600,fontSize:15,margin:"0 0 6px"}}>上传 CSV 文件开始分析</p>
+            <p style={{color:"#9ca3af",fontSize:12,margin:"0 0 20px"}}>Excel 请先另存为「CSV UTF-8」格式再上传</p>
+            <label style={{background:"#4f46e5",color:"#fff",borderRadius:8,padding:"12px 32px",cursor:"pointer",fontSize:14,fontWeight:600,display:"inline-block"}}>
+              选择文件上传
+              <input type="file" accept=".csv" onChange={handleFile} style={{display:"none"}}/>
+            </label>
+            <div style={{marginTop:20,background:"#f8faff",borderRadius:8,padding:12,fontSize:11,color:"#6b7280",textAlign:"left",lineHeight:1.8}}>
+              <b style={{color:"#4f46e5"}}>📋 所需字段：</b><br/>
+              调起的时间 · 近一年搜索健康query的天数 · 近一年有其他健康行为的天数 · 近一年搜索健康query的次数 · 近一年其他健康行为的天数 · 最近一次健康搜索的时间 · 最近一次健康其他行为的时间 · 调起用户的生命周期 · 调起用户的收益
+            </div>
+          </>}
+        </div>
+      </div>
+    </div>
+  );
+
+  const targetPct=(S.target.length/Math.max(rows.filter(r=>r._target!==null).length,1)*100).toFixed(1);
+  const medPct=(S.med.length/Math.max(rows.length,1)*100).toFixed(1);
+  const nonMedPct=(100-parseFloat(medPct)).toFixed(1);
+
+  return(
+    <div style={{background:"#f0f4ff",minHeight:"100vh",padding:20}}>
+      <div style={{maxWidth:960,margin:"0 auto"}}>
+        <div style={{background:"linear-gradient(135deg,#4f46e5,#7c3aed)",borderRadius:16,padding:"16px 22px",marginBottom:14,color:"#fff",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+          <div>
+            <h1 style={{margin:0,fontSize:18,fontWeight:700}}>📈 投放用户收益分析工具</h1>
+            <p style={{margin:"3px 0 0",opacity:.8,fontSize:12}}>共 {rows.length} 条 | 目标：收益高(&gt;{RV_TH})·覆盖广·生命周期短(&lt;{LC_TH}) | 医疗 {S.med.length}人·非医疗 {S.nonMed.length}人</p>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={handlePDF} style={{background:"rgba(255,255,255,0.9)",color:"#4f46e5",border:"none",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:600}}>📄 下载PDF</button>
+            <button onClick={()=>setRows(null)} style={{background:"rgba(255,255,255,0.2)",color:"#fff",border:"1px solid rgba(255,255,255,0.4)",borderRadius:8,padding:"7px 14px",fontSize:12}}>重新上传</button>
+          </div>
+        </div>
+
+        <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+          {tabs.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)}
+              style={{background:tab===t.id?"#4f46e5":"#fff",color:tab===t.id?"#fff":"#6b7280",border:"1px solid #e5e7eb",borderRadius:8,padding:"7px 16px",fontSize:13,fontWeight:tab===t.id?700:400}}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div id="pdf-content">
+        {tab==="overview"&&<>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10,marginBottom:14}}>
+            <StatCard label="总样本" val={rows.length+"条"} color="#4f46e5"/>
+            <StatCard label="医疗用户" val={S.med.length+"人"} sub={medPct+"%"} color="#0891b2"/>
+            <StatCard label="非医疗用户" val={S.nonMed.length+"人"} sub={nonMedPct+"%"} color="#9ca3af"/>
+            <StatCard label="短生命周期（优质）" val={S.allM.lcShort+"人"} sub={S.allM.lcShortPct+"%"} color="#7c3aed"/>
+            <StatCard label="高收益" val={S.allM.rvHigh+"人"} sub={S.allM.rvHighPct+"%"} color="#059669"/>
+            <StatCard label="双达标目标用户" val={S.target.length+"人"} sub={targetPct+"%"} color="#dc2626" bg="#fff5f5"/>
+          </div>
+          <Card>
+            <STitle>🎯 目标用户定义</STitle>
+            <div style={{fontSize:13,color:"#374151",lineHeight:2,background:"#fef9ee",borderRadius:8,padding:"10px 14px"}}>
+              <div>✅ <b>生命周期 &lt; {LC_TH}</b>（短生命周期，变现快、回收效率高）</div>
+              <div>✅ <b>收益 &gt; {RV_TH}</b>（高收益，商业变现能力强）</div>
+              <div style={{color:"#9ca3af",marginTop:4,fontSize:12}}>双达标目标用户共 <b style={{color:"#dc2626"}}>{S.target.length}人（{targetPct}%）</b></div>
+            </div>
+          </Card>
+          <Card>
+            <STitle>📊 医疗 vs 非医疗 · 核心指标对比</STitle>
+            <DataTable
+              headers={["分组","人数","占比","短生命周期","短LC占比","高收益","高收益占比","双达标","双达标占比","均值生命周期","均值收益"]}
+              headerBg="#eff6ff" headerColor="#2563eb"
+              rows={[
+                [{text:"全体",style:{fontWeight:600}},S.allM.n,"100%",S.allM.lcShort,S.allM.lcShortPct+"%",S.allM.rvHigh,S.allM.rvHighPct+"%",S.target.length,targetPct+"%",fmt(S.allM.meanLC,3),fmt(S.allM.meanRV,4)],
+                [{text:"医疗用户",style:{fontWeight:700,color:"#0891b2"}},S.medM.n,medPct+"%",S.medM.lcShort,{text:S.medM.lcShortPct+"%",style:{fontWeight:700,color:"#7c3aed"}},S.medM.rvHigh,{text:S.medM.rvHighPct+"%",style:{fontWeight:700,color:"#059669"}},S.medM.target,{text:S.medM.targetPct+"%",style:{fontWeight:700,color:"#dc2626"}},fmt(S.medM.meanLC,3),fmt(S.medM.meanRV,4)],
+                [{text:"非医疗用户",style:{fontWeight:700,color:"#9ca3af"}},S.nonMedM.n,nonMedPct+"%",S.nonMedM.lcShort,S.nonMedM.lcShortPct+"%",S.nonMedM.rvHigh,S.nonMedM.rvHighPct+"%",S.nonMedM.target,S.nonMedM.targetPct+"%",fmt(S.nonMedM.meanLC,3),fmt(S.nonMedM.meanRV,4)],
+              ]}
+            />
+          </Card>
+          <Card>
+            <STitle>📋 核心发现</STitle>
+            <div style={{fontSize:13,color:"#374151",lineHeight:2.2}}>
+              <div>🏥 <b>医疗用户</b>（{medPct}%）：双达标 <b style={{color:"#dc2626"}}>{S.medM.targetPct}%</b>，短生命周期 {S.medM.lcShortPct}%，高收益 {S.medM.rvHighPct}%</div>
+              <div>🔘 <b>非医疗用户</b>（{nonMedPct}%）：双达标 <b style={{color:"#9ca3af"}}>{S.nonMedM.targetPct}%</b>，整体质量偏低</div>
+              <div>⚠️ 收益分布高度右偏，精准定向比广撒网更重要</div>
+              <div>📌 医疗用户是核心投放基盘，非医疗用户作为补量兜底，需降低出价</div>
+            </div>
+          </Card>
+        </>}
+
+        {tab==="insight"&&<>
+          <div style={{background:"#e0e7ff",borderRadius:10,padding:"8px 14px",marginBottom:12,fontSize:13,color:"#3730a3",fontWeight:600}}>第一部分：医疗用户 vs 非医疗用户</div>
+          <Card>
+            <STitle>🏥 用户分类说明</STitle>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+              {[
+                {label:"医疗用户",n:S.med.length,p:medPct,desc:"近一年有健康搜索记录 或 有其他健康行为记录",color:"#0891b2",bg:"#eff6ff",lc:S.medM.lcShortPct,mlc:S.medM.meanLC,mrv:S.medM.meanRV},
+                {label:"非医疗用户",n:S.nonMed.length,p:nonMedPct,desc:"健康搜索天数与健康行为天数均为空",color:"#9ca3af",bg:"#f3f4f6",lc:S.nonMedM.lcShortPct,mlc:S.nonMedM.meanLC,mrv:S.nonMedM.meanRV},
+              ].map((g,i)=>(
+                <div key={i} style={{flex:1,minWidth:200,background:g.bg,borderRadius:10,padding:"14px 16px"}}>
+                  <div style={{fontWeight:700,color:g.color,fontSize:14}}>{g.label}</div>
+                  <div style={{fontSize:22,fontWeight:800,color:g.color,margin:"4px 0"}}>{g.n}<span style={{fontSize:13}}> 人</span><span style={{fontSize:12,fontWeight:400,marginLeft:6,opacity:.7}}>{g.p}%</span></div>
+                  <div style={{fontSize:11,color:"#6b7280",lineHeight:1.6,marginBottom:8}}>{g.desc}</div>
+                  <div style={{fontSize:12,display:"flex",gap:12,flexWrap:"wrap"}}>
+                    <span>短生命周期 <b style={{color:g.color}}>{g.lc}%</b></span>
+                    <span>均值LC <b style={{color:g.color}}>{fmt(g.mlc,3)}</b></span>
+                    <span>均值收益 <b style={{color:g.color}}>{fmt(g.mrv,4)}</b></span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+          <Card>
+            <STitle>投放价值对比</STitle>
+            <DataTable
+              headers={["指标","医疗用户","非医疗用户","差距"]}
+              rows={[
+                ["双达标占比",{text:S.medM.targetPct+"%",style:{color:"#dc2626",fontWeight:700}},S.nonMedM.targetPct+"%",{text:S.medM.targetPct&&S.nonMedM.targetPct&&S.nonMedM.targetPct!=="-"?"医疗"+(parseFloat(S.medM.targetPct)>parseFloat(S.nonMedM.targetPct)?"高":"低")+" "+Math.abs(parseFloat(S.medM.targetPct)-parseFloat(S.nonMedM.targetPct)).toFixed(1)+"pp":"-",style:{color:parseFloat(S.medM.targetPct)>parseFloat(S.nonMedM.targetPct)?"#10b981":"#ef4444",fontWeight:600}}],
+                ["短生命周期占比",{text:S.medM.lcShortPct+"%",style:{color:"#7c3aed",fontWeight:700}},S.nonMedM.lcShortPct+"%",{text:S.medM.lcShortPct&&S.nonMedM.lcShortPct&&S.nonMedM.lcShortPct!=="-"?"医疗"+(parseFloat(S.medM.lcShortPct)>parseFloat(S.nonMedM.lcShortPct)?"高":"低")+" "+Math.abs(parseFloat(S.medM.lcShortPct)-parseFloat(S.nonMedM.lcShortPct)).toFixed(1)+"pp":"-",style:{color:parseFloat(S.medM.lcShortPct)>parseFloat(S.nonMedM.lcShortPct)?"#10b981":"#ef4444",fontWeight:600}}],
+                ["高收益占比",{text:S.medM.rvHighPct+"%",style:{color:"#059669",fontWeight:700}},S.nonMedM.rvHighPct+"%",{text:S.medM.rvHighPct&&S.nonMedM.rvHighPct&&S.nonMedM.rvHighPct!=="-"?"医疗"+(parseFloat(S.medM.rvHighPct)>parseFloat(S.nonMedM.rvHighPct)?"高":"低")+" "+Math.abs(parseFloat(S.medM.rvHighPct)-parseFloat(S.nonMedM.rvHighPct)).toFixed(1)+"pp":"-",style:{color:parseFloat(S.medM.rvHighPct)>parseFloat(S.nonMedM.rvHighPct)?"#10b981":"#ef4444",fontWeight:600}}],
+                ["均值生命周期",{text:fmt(S.medM.meanLC,3),style:{fontWeight:700}},fmt(S.nonMedM.meanLC,3),{text:S.medM.meanLC&&S.nonMedM.meanLC?fmtPct(S.medM.meanLC,S.nonMedM.meanLC):"-",style:{color:S.medM.meanLC<S.nonMedM.meanLC?"#10b981":"#ef4444",fontWeight:600}}],
+                ["均值收益",{text:fmt(S.medM.meanRV,4),style:{fontWeight:700}},fmt(S.nonMedM.meanRV,4),{text:S.medM.meanRV&&S.nonMedM.meanRV?fmtPct(S.medM.meanRV,S.nonMedM.meanRV):"-",style:{color:S.medM.meanRV>S.nonMedM.meanRV?"#10b981":"#ef4444",fontWeight:600}}],
+              ]}
+            />
+          </Card>
+          <div style={{background:"#dcfce7",borderRadius:10,padding:"8px 14px",marginBottom:12,fontSize:13,color:"#166534",fontWeight:600}}>第二部分：医疗用户 · 各特征分析</div>
+          <Card>
+            <STitle>📌 医疗用户中：目标 vs 非目标 · 特征均值对比</STitle>
+            <p style={{fontSize:12,color:"#9ca3af",margin:"0 0 12px"}}>目标用户 = 生命周期&lt;{LC_TH} 且 收益&gt;{RV_TH}；医疗用户 {S.med.length} 人，目标用户 {S.medM.target} 人</p>
+            <DataTable
+              headers={["特征","目标用户均值","非目标用户均值","差异幅度","解读"]}
+              headerBg="#f0fdf4" headerColor="#059669"
+              rows={S.groupAnalysis.map(d=>{
+                const up=d.medTargetMean>d.medNonTargetMean;
+                const dv=d.medTargetMean&&d.medNonTargetMean?Math.abs((d.medTargetMean/d.medNonTargetMean-1)*100):null;
+                const insight=dv===null?"数据不足":dv>=30?(up?"显著更高 ✅":"显著更低 ⚠️"):dv>=10?(up?"偏高":"偏低"):"差异不明显";
+                return[{text:d.label,style:{fontWeight:600}},{text:fmt(d.medTargetMean),style:{color:"#059669",fontWeight:700}},{text:fmt(d.medNonTargetMean),style:{color:"#9ca3af"}},{text:dv!==null?(up?"↑":"↓")+dv.toFixed(1)+"%":"-",style:{color:up?"#10b981":"#ef4444",fontWeight:600}},{text:insight,style:{color:dv>=30?(up?"#059669":"#dc2626"):"#9ca3af",fontSize:11}}];
+              })}
+            />
+          </Card>
+          <Card>
+            <STitle>💡 特征小结</STitle>
+            <div style={{fontSize:13,color:"#374151",lineHeight:2.1}}>
+              {S.groupAnalysis.map((d,i)=>{
+                const up=d.medTargetMean>d.medNonTargetMean;
+                const dv=d.medTargetMean&&d.medNonTargetMean?((d.medTargetMean/d.medNonTargetMean-1)*100):null;
+                if(dv===null||Math.abs(dv)<20)return null;
+                return<div key={i} style={{display:"flex",gap:6,marginBottom:4}}><span>{up?"✅":"📉"}</span><span><b>{d.label}</b>：目标用户{up?"更高":"更低"} {Math.abs(dv).toFixed(0)}%，{up?"正向特征，适合定向筛选":"需注意排除极端高值"}</span></div>;
+              })}
+            </div>
+          </Card>
+        </>}
+
+        {tab==="active"&&(()=>{
+          const baseRV=mean(rows.map(r=>r._rv).filter(v=>v!==null));
+          const target2x=baseRV*2;
+          const bestN=(vals,getGrp)=>{
+            let best=null;
+            for(const n of vals){
+              const grp=getGrp(n);
+              const mnRV=mean(grp.map(r=>r._rv).filter(v=>v!==null));
+              if(mnRV!==null&&mnRV>=target2x){
+                if(!best||grp.length>best.grpLen)best={n,grpLen:grp.length};
+              }
+            }
+            return best?best.n:null;
+          };
+          const timeVals=[7,14,21,30,45,60,90,120,150,180,210,240,270,360];
+          const timeDims=[
+            {label:"上次搜索距今 ≤ N天",field:"上次搜索距今天数",color:"#0891b2",bg:"#eff6ff",hc:"#2563eb"},
+            {label:"上次健康行为距今 ≤ N天",field:"上次健康行为距今天数",color:"#7c3aed",bg:"#f5f3ff",hc:"#6d28d9"},
+          ];
+          const behaveDims=[
+            {label:"近一年搜索健康天数 ≥ N",field:"近一年搜索健康query的天数",color:"#059669",bg:"#f0fdf4",hc:"#047857"},
+            {label:"近一年搜索健康次数 ≥ N",field:"近一年搜索健康query的次数",color:"#0891b2",bg:"#ecfeff",hc:"#0e7490"},
+            {label:"近一年其他健康行为天数 ≥ N",field:"近一年有其他健康行为的天数",color:"#f59e0b",bg:"#fffbeb",hc:"#b45309"},
+            {label:"近一年其他健康行为次数 ≥ N",field:"近一年其他健康行为的天数",color:"#ef4444",bg:"#fff1f2",hc:"#b91c1c"},
+          ].map(d=>{
+            const maxVal=Math.max(0,...rows.filter(r=>r._isMedical).map(r=>toNum(r[d.field])||0));
+            const steps=[1,3,5,8,10,15,20,30,50,80,100,150,200,300].filter(n=>n<=maxVal);
+            return{...d,vals:[...new Set(steps)].sort((a,b)=>b-a)};
+          });
+          const hlStyle={background:"#fef9c3",borderLeft:"3px solid #f59e0b"};
+          const badge=<span style={{background:"#f59e0b",color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:10,marginLeft:6}}>推荐</span>;
+          const TRow=({n,label,grp,isHL,color})=>{
+            const mnRV=mean(grp.map(r=>r._rv).filter(v=>v!==null));
+            const mnLC=mean(grp.map(r=>r._lc).filter(v=>v!==null));
+            return<tr style={{borderBottom:"1px solid #f0f0ff",...(isHL?hlStyle:{})}}>
+              <td style={{padding:"6px 10px",fontWeight:700,color,fontSize:12}}>{label}{isHL&&badge}</td>
+              <td style={{padding:"6px 10px",fontSize:12,fontWeight:isHL?700:400}}>{grp.length}人</td>
+              <td style={{padding:"6px 10px",fontSize:12,fontWeight:isHL?700:400}}>{(grp.length/rows.length*100).toFixed(1)}%</td>
+              <td style={{padding:"6px 10px",fontSize:12,color:"#dc2626",fontWeight:600}}>{fmt(mnRV,4)}</td>
+              <td style={{padding:"6px 10px",fontSize:12,color:"#6b7280"}}>{fmt(mnLC,3)}</td>
+            </tr>;
+          };
+          const THead2=({bg,hc})=><thead><tr style={{background:bg}}>{["阈值","覆盖人数","覆盖占比","均值收益","均值生命周期"].map(h=><th key={h} style={{padding:"7px 10px",textAlign:"left",color:hc,fontWeight:600,whiteSpace:"nowrap",fontSize:12}}>{h}</th>)}</tr></thead>;
+          return<>
+            <div style={{background:"#fff7ed",borderRadius:8,padding:"8px 14px",marginBottom:14,fontSize:12,color:"#92400e"}}>
+              大盘均值收益 <b>{fmt(baseRV,4)}</b>，2× 基准 <b style={{color:"#dc2626"}}>{fmt(target2x,4)}</b>。<span style={{background:"#f59e0b",color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:10}}>推荐</span> 行为均值收益 ≥ 2× 大盘且覆盖最大的阈值。
+            </div>
+            {timeDims.map((cfg,ci)=>{
+              const bn=bestN(timeVals,n=>rows.filter(r=>r._isMedical&&(r[cfg.field]??9999)<=n));
+              return<Card key={"t"+ci}>
+                <h4 style={{fontSize:14,margin:"0 0 4px",color:cfg.color}}>{cfg.label}</h4>
+                <p style={{fontSize:11,color:"#9ca3af",margin:"0 0 10px"}}>医疗用户中，随阈值放宽覆盖量、均值收益与均值生命周期的变化</p>
+                <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <THead2 bg={cfg.bg} hc={cfg.hc}/>
+                  <tbody>{timeVals.map((n,i)=><TRow key={n} n={n} label={`≤${n}天`} grp={rows.filter(r=>r._isMedical&&(r[cfg.field]??9999)<=n)} isHL={n===bn} color={cfg.color}/>)}</tbody>
+                </table></div>
+              </Card>;
+            })}
+            {behaveDims.map((cfg,ci)=>{
+              const bn=bestN(cfg.vals,n=>rows.filter(r=>r._isMedical&&(toNum(r[cfg.field])||0)>=n));
+              return<Card key={"b"+ci}>
+                <h4 style={{fontSize:14,margin:"0 0 4px",color:cfg.color}}>{cfg.label}</h4>
+                <p style={{fontSize:11,color:"#9ca3af",margin:"0 0 10px"}}>医疗用户中，阈值从大到小排列</p>
+                <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <THead2 bg={cfg.bg} hc={cfg.hc}/>
+                  <tbody>{cfg.vals.map((n,i)=><TRow key={n} n={n} label={`≥${n}`} grp={rows.filter(r=>r._isMedical&&(toNum(r[cfg.field])||0)>=n)} isHL={n===bn} color={cfg.color}/>)}</tbody>
+                </table></div>
+              </Card>;
+            })}
+          </>;
+        })()}
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
